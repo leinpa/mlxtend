@@ -175,7 +175,7 @@ class SequentialFeatureSelector(BaseEstimator, MetaEstimatorMixin):
         # don't mess with this unless testing
         self._TESTING_INTERRUPT_MODE = False
 
-    def fit(self, X, y, **fit_params):
+    def fit(self, X, y, groups=None, **fit_params):  # groups: new argument
         """Perform feature selection and learn model from training data.
 
         Parameters
@@ -185,6 +185,8 @@ class SequentialFeatureSelector(BaseEstimator, MetaEstimatorMixin):
             n_features is the number of features.
         y : array-like, shape = [n_samples]
             Target values.
+        groups : array-like, shape = [n_features]
+            Grouping indices for features that should be considered at once.
         fit_params : dict of string -> object, optional
             Parameters to pass to to the fit method of classifier.
 
@@ -193,6 +195,9 @@ class SequentialFeatureSelector(BaseEstimator, MetaEstimatorMixin):
         self : object
 
         """
+        if groups is not None and not self.forward:
+            raise NotImplementedError("Selection of grouped feature is only implemented with 'forward=True'.")
+
         if not isinstance(self.k_features, int) and\
                 not isinstance(self.k_features, tuple)\
                 and not isinstance(self.k_features, str):
@@ -243,8 +248,13 @@ class SequentialFeatureSelector(BaseEstimator, MetaEstimatorMixin):
             k_to_select = self.k_features
 
         self.subsets_ = {}
-        orig_set = set(range(X.shape[1]))
-        n_features = X.shape[1]
+        if groups is None:
+            orig_set = set(range(X.shape[1]))
+            n_features = X.shape[1]
+        else:
+            orig_set = set(groups)
+            n_features = len(orig_set)
+
 
         if self.forward:
             if select_in_range:
@@ -266,7 +276,7 @@ class SequentialFeatureSelector(BaseEstimator, MetaEstimatorMixin):
         k_score = 0
 
         try:
-            while k != k_to_select:
+            while k < k_to_select:  # this was != in the original version
                 prev_subset = set(k_idx)
 
                 if self.forward:
@@ -275,6 +285,7 @@ class SequentialFeatureSelector(BaseEstimator, MetaEstimatorMixin):
                         subset=prev_subset,
                         X=X,
                         y=y,
+                        groups=groups,  # groups: new argument
                         **fit_params
                     )
                 else:
@@ -407,21 +418,30 @@ class SequentialFeatureSelector(BaseEstimator, MetaEstimatorMixin):
         self.fitted = True
         return self
 
-    def _inclusion(self, orig_set, subset, X, y, ignore_feature=None, **fit_params):
+    def _inclusion(self, orig_set, subset, X, y, groups, ignore_feature=None, **fit_params):  # groups: new argument
         all_avg_scores = []
         all_cv_scores = []
         all_subsets = []
         res = (None, None, None)
-        remaining = orig_set - subset
+        if groups is None:
+            remaining = orig_set - subset
+        else:
+            remaining = orig_set - set(group for i, group in enumerate(groups) if i in subset)
         if remaining:
             features = len(remaining)
             n_jobs = min(self.n_jobs, features)
             parallel = Parallel(n_jobs=n_jobs, verbose=self.verbose,
                                 pre_dispatch=self.pre_dispatch)
-            work = parallel(delayed(_calc_score)
-                            (self, X, y, tuple(subset | {feature}), **fit_params)
-                            for feature in remaining
-                            if feature != ignore_feature)
+            if groups is None:
+                work = parallel(delayed(_calc_score)
+                                (self, X, y, tuple(subset | {feature}), **fit_params)
+                                for feature in remaining
+                                if feature != ignore_feature)
+            else:
+                work = parallel(delayed(_calc_score)
+                                (self, X, y, tuple(subset | set([i for i, group in enumerate(groups) if group==feature])), **fit_params)
+                                for feature in remaining
+                                if feature != ignore_feature)
 
             for new_subset, cv_scores in work:
                 all_avg_scores.append(np.nanmean(cv_scores))
